@@ -1,0 +1,39 @@
+name: Daily Stock Forecast Pipeline
+
+on:
+  schedule:
+    # Runs Monday-Friday at 11:00 PM UTC
+    # This is 4:30 AM IST the following day
+    - cron: "0 23 * * 1-5"
+
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ingest latest stock data
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TICKERS: AAPL,AMZN,GOOGL,MSFT,NVDA
+        run: python ingest.py
+
+      - name: Train models and generate predictions
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TICKERS: AAPL,AMZN,GOOGL,MSFT,NVDA
+        run: python train.py
