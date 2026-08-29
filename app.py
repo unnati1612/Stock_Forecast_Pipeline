@@ -76,11 +76,22 @@ def load_prices(ticker: str) -> pd.DataFrame:
     """)
 
     with engine.connect() as conn:
-        return pd.read_sql(
+        df = pd.read_sql(
             query,
             conn,
             params={"ticker": ticker}
         )
+
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df = (
+            df.dropna(subset=["date", "close"])
+              .sort_values("date")
+              .reset_index(drop=True)
+        )
+
+    return df
 
 
 @st.cache_data(ttl=3600)
@@ -94,10 +105,11 @@ def load_predictions(ticker: str) -> pd.DataFrame:
             predicted_direction,
             predicted_prob,
             actual_direction,
-            correct
+            correct,
+            model_name
         FROM predictions
         WHERE ticker = :ticker
-        ORDER BY target_date ASC
+        ORDER BY target_date DESC, prediction_date DESC, id DESC
     """)
 
     with engine.connect() as conn:
@@ -167,20 +179,29 @@ st.subheader(f"{ticker} Overview")
 col1, col2, col3, col4 = st.columns(4)
 
 if not prices.empty:
-    latest_price = prices.iloc[-1]["close"]
+    latest_price = pd.to_numeric(
+        prices.iloc[-1]["close"],
+        errors="coerce"
+    )
     latest_date = prices.iloc[-1]["date"]
 
-    col1.metric(
-        "Latest closing price",
-        f"${latest_price:,.2f}",
-        f"As of {latest_date}"
-    )
+    if pd.notna(latest_price):
+        if isinstance(latest_date, pd.Timestamp):
+            latest_date = latest_date.date()
+
+        col1.metric(
+            "Latest closing price",
+            f"${float(latest_price):,.2f}",
+            f"As of {latest_date}"
+        )
+    else:
+        col1.metric("Latest closing price", "—")
 else:
     col1.metric("Latest closing price", "—")
 
 
 if not preds.empty:
-    latest_pred = preds.iloc[-1]
+    latest_pred = preds.iloc[0]
 
     direction_label = (
         "📈 UP"
@@ -188,12 +209,24 @@ if not preds.empty:
         else "📉 DOWN"
     )
 
-    probability = latest_pred["predicted_prob"]
+    probability = pd.to_numeric(
+        latest_pred["predicted_prob"],
+        errors="coerce"
+    )
+    model_used = latest_pred.get("model_name")
+
+    if pd.notna(probability):
+        confidence_text = f"{float(probability):.1%} confidence"
+    else:
+        confidence_text = "Confidence unavailable"
+
+    if pd.notna(model_used):
+        confidence_text += f" • {model_used}"
 
     col2.metric(
         "Latest prediction",
         direction_label,
-        f"{probability:.1%} confidence"
+        confidence_text
     )
 
     resolved = preds.dropna(subset=["correct"])
@@ -204,13 +237,22 @@ if not preds.empty:
         col3.metric(
             "Running accuracy",
             f"{running_accuracy:.1%}",
-            f"{len(resolved)} resolved predictions"
+            f"{len(resolved)} resolved prediction"
+            + ("" if len(resolved) == 1 else "s")
         )
     else:
         col3.metric(
             "Running accuracy",
             "—",
             "No resolved predictions yet"
+        )
+
+    if not resolved.empty and len(resolved) < 10:
+        st.caption(
+            f"⚠️ Running accuracy is based on only {len(resolved)} "
+            "resolved prediction"
+            + ("" if len(resolved) == 1 else "s")
+            + "; treat it as an early signal, not a performance benchmark."
         )
 
 else:
@@ -390,6 +432,10 @@ if not preds.empty:
             resolved["correct"].astype(float)
         )
 
+        resolved = resolved.sort_values(
+            "target_date"
+        ).reset_index(drop=True)
+
         resolved["cumulative_accuracy"] = (
             resolved["correct"].expanding().mean()
         )
@@ -415,6 +461,7 @@ if not preds.empty:
             title="Cumulative Prediction Accuracy Over Time",
             xaxis_title="Target Date",
             yaxis_title="Accuracy",
+            yaxis_tickformat=".0%",
             yaxis_range=[0, 1],
             height=400
         )
@@ -444,10 +491,18 @@ else:
 st.divider()
 
 st.subheader("📋 Prediction Log")
+st.caption("Each ticker has at most one prediction per target trading day.")
 
 if not preds.empty:
 
     prediction_log = preds.copy()
+
+    if "model_name" not in prediction_log.columns:
+        prediction_log["model_name"] = "Unknown"
+
+    prediction_log["model_name"] = (
+        prediction_log["model_name"].fillna("Unknown")
+    )
 
     # Make direction columns easier to read.
     prediction_log["predicted_direction"] = (
@@ -483,10 +538,18 @@ if not preds.empty:
         .map(lambda x: f"{x:.1%}")
     )
 
+    for date_col in ["Prediction Date", "Target Date"]:
+        if date_col in prediction_log.columns:
+            prediction_log[date_col] = pd.to_datetime(
+                prediction_log[date_col],
+                errors="coerce"
+            ).dt.date
+
     prediction_log = prediction_log.rename(
         columns={
             "prediction_date": "Prediction Date",
             "target_date": "Target Date",
+            "model_name": "Model",
             "predicted_direction": "Predicted Direction",
             "predicted_prob": "Confidence",
             "actual_direction": "Actual Direction",
